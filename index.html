@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Tiempos de inspección post-mortem</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg:#F5F6F8; --card:#FFFFFF; --ink:#1E2A38; --muted:#5E6B7B; --line:#DDE2E8;
+    --c1:#2F4B6E; --c2:#6F86A3; --c3:#AEBCCD; --accent:#C8372D; --accent-bg:#FBE9E7;
+    box-sizing:border-box; padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:#141A22; --card:#1C242F; --ink:#E8ECF1; --muted:#9AA7B6; --line:#2E3946;
+      --accent:#FF6B5E; --accent-bg:#3A2321;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:#141A22; --card:#1C242F; --ink:#E8ECF1; --muted:#9AA7B6; --line:#2E3946;
+    --accent:#FF6B5E; --accent-bg:#3A2321;
+  }
+  * { box-sizing:border-box; }
+  html { scroll-padding-top:env(safe-area-inset-top,0px); }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 "Segoe UI",system-ui,-apple-system,Roboto,sans-serif; }
+  main { max-width:1100px; margin:0 auto; padding:28px 20px 40px; }
+  h1 { font-size:clamp(26px,4vw,36px); margin:0 0 4px; font-weight:700; letter-spacing:-0.01em; }
+  .sub { color:var(--muted); margin:0 0 24px; font-size:17px; }
+  .controls { display:flex; flex-wrap:wrap; gap:20px 32px; align-items:flex-end; margin-bottom:24px; }
+  .ctl label { display:block; font-size:14px; color:var(--muted); margin-bottom:6px; }
+  .seg { display:inline-flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; background:var(--card); }
+  .seg button { border:0; background:transparent; color:var(--ink); font:inherit; font-size:15px; padding:9px 16px; cursor:pointer; }
+  .seg button + button { border-left:1px solid var(--line); }
+  .seg button[aria-pressed="true"] { background:var(--c1); color:#fff; }
+  .seg button:focus-visible, input:focus-visible { outline:3px solid var(--c2); outline-offset:2px; }
+  input[type=range] { width:200px; accent-color:var(--c1); }
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:14px; margin-bottom:20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:18px 20px; }
+  .kpi .l { color:var(--muted); font-size:14px; }
+  .kpi .v { font-size:34px; font-weight:700; line-height:1.2; margin:2px 0; font-variant-numeric:tabular-nums; }
+  .kpi .s { color:var(--muted); font-size:14px; }
+  .kpi.risk .v { color:var(--accent); }
+  .grid2 { display:grid; grid-template-columns:1fr; gap:14px; margin-bottom:20px; }
+  .card h2 { font-size:19px; margin:0 0 2px; }
+  .card .hint { color:var(--muted); font-size:14px; margin:0 0 12px; }
+  .chart { position:relative; height:300px; }
+  .scroll { overflow-x:auto; }
+  table { border-collapse:collapse; width:100%; min-width:640px; font-variant-numeric:tabular-nums; }
+  th, td { padding:10px 12px; text-align:right; border-bottom:1px solid var(--line); font-size:16px; }
+  th:first-child, td:first-child { text-align:left; }
+  thead th { color:var(--muted); font-weight:600; font-size:14px; }
+  td.flag { background:var(--accent-bg); color:var(--accent); font-weight:700; }
+  td.avg { font-weight:700; }
+  tr.total td { border-bottom:0; font-weight:700; }
+  .note { color:var(--muted); font-size:13px; margin-top:10px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Tiempos de inspección post-mortem</h1>
+  <p class="sub">Canales de cerdos: revisión de 10 canales frente a 15 canales</p>
+
+  <div class="controls">
+    <div class="ctl"><label>Tamaño de revisión</label>
+      <div class="seg" id="segScen"></div></div>
+    <div class="ctl"><label>Actividad</label>
+      <div class="seg" id="segAct"></div></div>
+    <div class="ctl"><label for="thr">Umbral de toma atípica: <b id="thrOut">8</b>% sobre el promedio</label>
+      <input type="range" id="thr" min="3" max="20" value="8"></div>
+  </div>
+
+  <section class="kpis" id="kpis"></section>
+
+  <section class="grid2">
+    <div class="card">
+      <h2>Composición del tiempo total</h2>
+      <p class="hint">Promedio por actividad, en minutos y segundos</p>
+      <div class="chart" style="height:230px"><canvas id="chComp"></canvas></div>
+    </div>
+    <div class="card">
+      <h2 id="tomasTitle"></h2>
+      <p class="hint">Las tomas en rojo superan el umbral frente al promedio (línea punteada)</p>
+      <div class="chart"><canvas id="chTomas"></canvas></div>
+    </div>
+    <div class="card">
+      <h2 id="tblTitle"></h2>
+      <p class="hint">Tiempos en minutos:segundos. Las celdas en rojo son tomas atípicas.</p>
+      <div class="scroll"><table id="tbl"></table></div>
+    </div>
+  </section>
+</main>
+
+<script>
+/* ---------- Datos (promedios y totales tal como se midieron) ---------- */
+const DATA = {
+  10: { label:"10 canales", n:10, total:"9:18", acts:[
+    { name:"Secado de canales",  tomas:["6:24","6:15","7:07","6:16","6:47","6:35","6:41"], avg:"6:35" },
+    { name:"Revisión en tarima", tomas:["1:43","1:48","1:45","1:50","1:45","1:48","1:58"], avg:"1:48" },
+    { name:"Sellado",            tomas:["0:54","0:52","0:53","0:55","0:55","1:03","0:54"], avg:"0:55" } ] },
+  15: { label:"15 canales", n:15, total:"10:26", acts:[
+    { name:"Secado de canales",  tomas:["7:10","7:15","6:50","6:44","6:51","6:35","6:51"], avg:"6:53" },
+    { name:"Revisión en tarima", tomas:["2:13","2:25","2:23","2:25","2:18","2:28","2:26"], avg:"2:22" },
+    { name:"Sellado",            tomas:["1:15","1:11","1:14","1:09","1:10","1:15","1:00"], avg:"1:10" } ] }
+};
+
+/* ---------- Utilidades de tiempo ---------- */
+const toSec = t => { const [m, s] = t.split(":").map(Number); return m * 60 + s; };
+const fmt = s => { s = Math.round(s); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); };
+const pct = (a, b) => (a - b) / b * 100;
+const signed = (s) => (s < 0 ? "−" : "+") + fmt(Math.abs(s));
+const cssVar = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+/* ---------- Estado ---------- */
+const state = { scen: "10", act: 0, thr: 8 };
+let chComp = null, chTomas = null;
+
+/* ---------- Controles ---------- */
+function buildSegment(el, items, key) {
+  el.innerHTML = "";
+  items.forEach(([val, text]) => {
+    const b = document.createElement("button");
+    b.textContent = text; b.dataset.v = val;
+    b.onclick = () => { state[key] = key === "act" ? Number(val) : val; render(); };
+    el.appendChild(b);
+  });
+}
+function syncSegments() {
+  document.querySelectorAll("#segScen button").forEach(b => b.setAttribute("aria-pressed", b.dataset.v === state.scen));
+  document.querySelectorAll("#segAct button").forEach(b => b.setAttribute("aria-pressed", Number(b.dataset.v) === state.act));
+}
+
+/* ---------- Tarjetas de indicadores ---------- */
+function isFlag(sec, avg) { return Math.abs(pct(sec, avg)) > state.thr; }
+function renderKpis() {
+  const d = DATA[state.scen], o = DATA[state.scen === "10" ? "15" : "10"];
+  const tot = toSec(d.total), totO = toSec(o.total);
+  const per = tot / d.n, perO = totO / o.n;
+  const seco = toSec(d.acts[0].avg) / tot * 100;
+  let flagged = 0, all = 0;
+  d.acts.forEach(a => a.tomas.forEach(t => { all++; if (isFlag(toSec(t), toSec(a.avg))) flagged++; }));
+  const k = [
+    ["Tiempo total promedio", fmt(tot), `Secado = ${seco.toFixed(0)}% del total`, ""],
+    ["Tiempo por canal", per.toFixed(1) + " s", `${pct(per, perO) >= 0 ? "+" : "−"}${Math.abs(pct(per, perO)).toFixed(1)}% frente a ${o.label}`, ""],
+    ["Total frente a " + o.label, signed(tot - totO), `${pct(tot, totO) >= 0 ? "+" : "−"}${Math.abs(pct(tot, totO)).toFixed(1)}% en tiempo total`, ""],
+    ["Tomas atípicas", `${flagged} de ${all}`, `Umbral de ${state.thr}% sobre el promedio`, flagged ? "risk" : ""]
+  ];
+  document.getElementById("kpis").innerHTML = k.map(([l, v, s, c]) =>
+    `<div class="card kpi ${c}"><div class="l">${l}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join("");
+}
+
+/* ---------- Gráfica de composición (barras apiladas) ---------- */
+const barLabels = { id: "barLabels", afterDatasetsDraw(c) {
+  const ctx = c.ctx, cols = ["#fff", "#fff", "#1E2A38"];
+  c.data.datasets.forEach((ds, i) => c.getDatasetMeta(i).data.forEach((b, j) => {
+    ctx.save(); ctx.fillStyle = cols[i]; ctx.font = "600 15px system-ui";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(fmt(ds.data[j]), (b.x + b.base) / 2, b.y); ctx.restore();
+  }));
+} };
+function renderComposition() {
+  const colors = [cssVar("--c1"), cssVar("--c2"), cssVar("--c3")];
+  const sets = DATA[10].acts.map((a, i) => ({
+    label: a.name, backgroundColor: colors[i], borderWidth: 0, barThickness: 56,
+    data: [toSec(DATA[10].acts[i].avg), toSec(DATA[15].acts[i].avg)]
+  }));
+  if (chComp) chComp.destroy();
+  chComp = new Chart(document.getElementById("chComp"), {
+    type: "bar", plugins: [barLabels],
+    data: { labels: ["10 canales", "15 canales"], datasets: sets },
+    options: { indexAxis: "y", responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { position: "bottom", labels: { color: cssVar("--ink"), font: { size: 14 }, boxWidth: 14 } },
+        tooltip: { callbacks: { label: c => `${c.dataset.label}: ${fmt(c.parsed.x)}` } } },
+      scales: {
+        x: { stacked: true, grid: { color: cssVar("--line") }, border: { display: false },
+             ticks: { color: cssVar("--muted"), font: { size: 14 }, callback: v => fmt(v) } },
+        y: { stacked: true, grid: { display: false }, border: { display: false },
+             ticks: { color: cssVar("--ink"), font: { size: 15, weight: "600" } } } } }
+  });
+}
+
+/* ---------- Gráfica de tomas con promedio y atípicos ---------- */
+function renderTomas() {
+  const d = DATA[state.scen], a = d.acts[state.act], avg = toSec(a.avg);
+  const vals = a.tomas.map(toSec), flags = vals.map(v => isFlag(v, avg));
+  document.getElementById("tomasTitle").textContent = `${a.name} en ${d.label}: tiempo por toma`;
+  const base = cssVar("--c1"), acc = cssVar("--accent");
+  if (chTomas) chTomas.destroy();
+  chTomas = new Chart(document.getElementById("chTomas"), {
+    type: "line",
+    data: { labels: a.tomas.map((_, i) => "Toma " + (i + 1)), datasets: [
+      { label: "Tiempo de la toma", data: vals, borderColor: base, borderWidth: 2.5, tension: 0,
+        pointRadius: flags.map(f => f ? 9 : 6), pointBackgroundColor: flags.map(f => f ? acc : base), pointBorderWidth: 0 },
+      { label: "Promedio " + a.avg, data: vals.map(() => avg), borderColor: cssVar("--muted"), borderDash: [6, 5],
+        borderWidth: 2, pointRadius: 0 } ] },
+    options: { responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { position: "bottom", labels: { color: cssVar("--ink"), font: { size: 14 }, boxWidth: 14 } },
+        tooltip: { callbacks: { label: c => c.datasetIndex === 0
+          ? `${fmt(c.parsed.y)} (${pct(c.parsed.y, avg) >= 0 ? "+" : "−"}${Math.abs(pct(c.parsed.y, avg)).toFixed(1)}% frente al promedio)`
+          : `Promedio ${a.avg}` } } },
+      scales: {
+        x: { grid: { display: false }, border: { color: cssVar("--line") }, ticks: { color: cssVar("--ink"), font: { size: 14 } } },
+        y: { grid: { color: cssVar("--line") }, border: { display: false }, suggestedMin: Math.min(...vals) * 0.9, suggestedMax: Math.max(...vals) * 1.06,
+             ticks: { color: cssVar("--muted"), font: { size: 14 }, callback: v => fmt(v) } } } }
+  });
+}
+
+/* ---------- Tabla ---------- */
+function renderTable() {
+  const d = DATA[state.scen];
+  document.getElementById("tblTitle").textContent = `Detalle de tomas: revisión de ${d.label}`;
+  const head = "<thead><tr><th>Actividad</th>" + [1,2,3,4,5,6,7].map(i => `<th>Toma ${i}</th>`).join("") + "<th>Promedio</th></tr></thead>";
+  const rows = d.acts.map(a => {
+    const avg = toSec(a.avg);
+    return "<tr><td>" + a.name + "</td>" + a.tomas.map(t => `<td class="${isFlag(toSec(t), avg) ? "flag" : ""}">${t}</td>`).join("") + `<td class="avg">${a.avg}</td></tr>`;
+  }).join("");
+  document.getElementById("tbl").innerHTML = head + "<tbody>" + rows +
+    `<tr class="total"><td>Total</td><td colspan="7"></td><td>${d.total}</td></tr></tbody>`;
+}
+
+/* ---------- Render general ---------- */
+function render() { syncSegments(); renderKpis(); renderComposition(); renderTomas(); renderTable(); }
+
+buildSegment(document.getElementById("segScen"), [["10", "10 canales"], ["15", "15 canales"]], "scen");
+buildSegment(document.getElementById("segAct"), DATA[10].acts.map((a, i) => [i, a.name]), "act");
+document.getElementById("thr").oninput = e => {
+  state.thr = Number(e.target.value); document.getElementById("thrOut").textContent = state.thr; render();
+};
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", render);
+render();
+</script>
+</body>
+</html>
